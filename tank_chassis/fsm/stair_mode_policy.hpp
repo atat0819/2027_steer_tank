@@ -1,0 +1,67 @@
+#ifndef STAIR_MODE_POLICY_HPP
+#define STAIR_MODE_POLICY_HPP
+
+#include <cstdint>
+
+static constexpr uint8_t UP = 1;
+static constexpr uint8_t DOWN = 2;
+static constexpr uint8_t MIDDLE = 3;
+
+enum class StairMode : uint8_t { NORMAL, IMU };
+
+// 只协调目标命令；前后电机仍由各自独立的 FSM 执行。
+struct StairCommand {
+  StairMode mode = StairMode::NORMAL;
+  bool front_target_requested = false;
+  bool rear_retract_requested = false;
+};
+
+inline void UpdateStairCommand(StairCommand &command, bool control_enabled,
+                               bool imu_request, bool normal_request,
+                               bool b_pressed) {
+  // 安全停车和 C 优先；V 重新开始初始位/调平阶段。
+  if (!control_enabled || normal_request) {
+    command = StairCommand{};
+  } else if (imu_request) {
+    command = StairCommand{};
+    command.mode = StairMode::IMU;
+  } else if (b_pressed && command.mode == StairMode::IMU) {
+    command.front_target_requested = !command.front_target_requested;
+    command.rear_retract_requested = !command.front_target_requested;
+  }
+}
+
+struct StairModePolicy {
+  bool zero_all_torque;              // 双下、失联或非法档位：禁止机构电机输出力矩
+  bool control_fault;                // 失联或非法档位：异常安全停车
+  bool front_hold_enabled;           // 是否允许前 4340 保持初始/目标位置
+  bool rear_attitude_enabled;        // 是否允许后 6248 运行姿态控制
+  bool front_stair_command_enabled;  // 仅双中且键盘在线时允许 B 动作
+  bool rear_retract_command_enabled;
+};
+
+inline StairModePolicy EvaluateStairModePolicy(uint8_t s1, uint8_t s2,
+                                               bool control_link_online,
+                                               bool keyboard_online) {
+  // 将遥控档位和通信状态转换为上台阶任务使用的统一策略。
+  // 返回值不直接发送电机命令，只决定哪些控制模块可以运行。
+  // 先统一判断档位和链路，再由任务执行安全分支，避免各处重复判断。
+  const bool valid_switches = s1 >= UP && s1 <= MIDDLE && s2 >= UP &&
+                              s2 <= MIDDLE;
+  const bool control_fault = !control_link_online || !valid_switches;
+  if (control_fault) {
+    return {true, true, false, false, false, false};
+  }
+
+  // 双下是主动停车，区分于遥控器链路或档位异常。
+  if (s1 == DOWN && s2 == DOWN) {
+    return {true, false, false, false, false, false};
+  }
+
+  const bool keyboard_command_enabled =
+      s1 == MIDDLE && s2 == MIDDLE && keyboard_online;
+  return {false, false, true, true, keyboard_command_enabled,
+          keyboard_command_enabled};
+}
+
+#endif  // STAIR_MODE_POLICY_HPP
